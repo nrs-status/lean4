@@ -159,6 +159,9 @@ private structure EvalAction where
   If `some`, the expression is what type to use for the type ascription when `pp.type` is true. -/
   printVal : Option Expr
 
+#print CommandElabM
+#reduce CommandElabM
+-- tk here will be used to provide position to logger and nothing else
 unsafe def elabEvalCoreUnsafe (bang : Bool) (tk term : Syntax) (expectedType? : Option Expr) : CommandElabM Unit := withRef tk do
   let declName := `_eval
   -- `t` is either `MessageData` or `Format`, and `mkT` is for synthesizing an expression that yields a `t`.
@@ -169,19 +172,28 @@ unsafe def elabEvalCoreUnsafe (bang : Bool) (tk term : Syntax) (expectedType? : 
     -- A trick here is that `mkMAct?` makes use of `MonadEval` instances are currently available in this stage,
     -- and we do not need them to be available in the target environment.
     let mkMAct? (mc : Name) (m : Type → Type) [Monad m] [MonadEvalT m CommandElabM] (e : Expr) : TermElabM (Option EvalAction) := do
+      -- mkApptOptM makes an application Expr from ``MonadEvalT.monadEval and the array that follows
+      -- observing? comes from MonadBacktrack, probably to skip failure to make the application
       let some e ← observing? (mkAppOptM ``MonadEvalT.monadEval #[none, mkConst mc, none, none, e])
         | return none
+      -- appFn! grabs an expression containing an application an extracts the function in it
+      -- appArg! grabs an expression containing an application and extracts the arguments from ti
       let eType := e.appFn!.appArg!
       if ← isDefEq eType (mkConst ``Unit) then
         addAndCompileExprForEval declName e (allowSorry := bang)
         let mf : m Unit ← evalConst (m Unit) declName
         return some { eval := do MonadEvalT.monadEval mf; pure "", printVal := none }
       else
-        let rf ← withLocalDeclD `x eType fun x => do mkLambdaFVars #[x] (← mkT x)
+        -- mkLambdaFVars grabs array #[x] and body (<- mkT x) and makes fun ...#[x] => (<-mkT x)
+        -- wrt withLocalDeclD : see instead withLocalDecl. Creates free variable `x, adds it to the context and runs it in, in this case, the monad TermElabM. withLocalDecl isn't necessarily related to expressions and will grab an `x to run it in a given monad, but in this particular case it runs `x within TermElabM
+        let rf ← withLocalDeclD `x eType (fun x => do mkLambdaFVars #[x] (← mkT x))
         let r ← mkAppM ``Functor.map #[rf, e]
         addAndCompileExprForEval declName r (allowSorry := bang)
+        -- evalConst here comes from monadEnv, but monadEnv.evalConst calls Environment.evalConst
         let mf : m t ← evalConst (m t) declName
+        -- next statement is return for TermElabM (Option EvalAction)
         return some { eval := toMessageData <$> MonadEvalT.monadEval mf, printVal := some eType }
+    -- now we have left mkMAct? and are back within mkAct. mkMAct? will now be used in the body of mkAct
     if let some act ← mkMAct? ``CommandElabM CommandElabM e
                     -- Fallbacks in case we are in the Lean package but don't have `CommandElabM` yet
                     <||> mkMAct? ``TermElabM TermElabM e <||> mkMAct? ``MetaM MetaM e <||> mkMAct? ``CoreM CoreM e
@@ -189,7 +201,7 @@ unsafe def elabEvalCoreUnsafe (bang : Bool) (tk term : Syntax) (expectedType? : 
                     <||> mkMAct? ``IO IO e then
       return act
     else
-      -- Otherwise, assume this is a pure value.
+      -- Otherwise, assume this is a pure value; i.e., what is eval'd is not a monadic action
       -- There is no need to adapt pure values to `CommandElabM`.
       -- This enables `#eval` to work on pure values even when `CommandElabM` is not available.
       let r ← try mkT e catch ex => do
@@ -208,6 +220,7 @@ unsafe def elabEvalCoreUnsafe (bang : Bool) (tk term : Syntax) (expectedType? : 
       -- `evalConst` may emit IO, but this is collected by `withIsolatedStreams` below.
       let r ← toMessageData <$> evalConst t declName
       return { eval := pure r, printVal := some (← inferType e) }
+  -- the following is at same level as mkAct. i.e., mkAct is now defined
   let (output, exOrRes) ← IO.FS.withIsolatedStreams do
     try
       -- Generate an action without executing it. We use `withoutModifyingEnv` to ensure
@@ -235,6 +248,8 @@ unsafe def elabEvalCoreUnsafe (bang : Bool) (tk term : Syntax) (expectedType? : 
       logInfo m!"{res} : {type}"
     else
       logInfo res
+
+
 
 @[implemented_by elabEvalCoreUnsafe]
 opaque elabEvalCore (bang : Bool) (tk term : Syntax) (expectedType? : Option Expr) : CommandElabM Unit

@@ -147,6 +147,7 @@ See also `Lean.matchConstStructure` for a less restrictive version.
         | _ => failK ()
       | _ => failK ()
 
+-- ofExcept unwraps `Except e a` to get `a` or throws excepption otherwise
 unsafe def evalConst [Monad m] [MonadEnv m] [MonadError m] [MonadOptions m] (α) (constName : Name) : m α := do
   ofExcept <| (← getEnv).evalConst α (← getOptions) constName
 
